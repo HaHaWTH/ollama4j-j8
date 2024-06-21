@@ -8,22 +8,21 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.LinkedList;
 import java.util.Queue;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
+import lombok.Setter;
 
 @Data
 @EqualsAndHashCode(callSuper = true)
 @SuppressWarnings("unused")
 public class OllamaAsyncResultCallback extends Thread {
-  private final HttpRequest.Builder requestBuilder;
+  private final HttpURLConnection url;
   private final OllamaGenerateRequestModel ollamaRequestModel;
   private final Queue<String> queue = new LinkedList<>();
   private String result;
@@ -36,6 +35,7 @@ public class OllamaAsyncResultCallback extends Thread {
    */
   @Getter private boolean succeeded;
 
+  @Setter
   private long requestTimeoutSeconds;
 
   /**
@@ -48,10 +48,10 @@ public class OllamaAsyncResultCallback extends Thread {
   @Getter private long responseTime = 0;
 
   public OllamaAsyncResultCallback(
-      HttpRequest.Builder requestBuilder,
-      OllamaGenerateRequestModel ollamaRequestModel,
-      long requestTimeoutSeconds) {
-    this.requestBuilder = requestBuilder;
+          HttpURLConnection url,
+          OllamaGenerateRequestModel ollamaRequestModel,
+          long requestTimeoutSeconds) {
+    this.url = url;
     this.ollamaRequestModel = ollamaRequestModel;
     this.isDone = false;
     this.result = "";
@@ -61,36 +61,36 @@ public class OllamaAsyncResultCallback extends Thread {
 
   @Override
   public void run() {
-    HttpClient httpClient = HttpClient.newHttpClient();
+    HttpURLConnection connection = null;
     try {
       long startTime = System.currentTimeMillis();
-      HttpRequest request =
-          requestBuilder
-              .POST(
-                  HttpRequest.BodyPublishers.ofString(
-                      Utils.getObjectMapper().writeValueAsString(ollamaRequestModel)))
-              .header("Content-Type", "application/json")
-              .timeout(Duration.ofSeconds(requestTimeoutSeconds))
-              .build();
-      HttpResponse<InputStream> response =
-          httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-      int statusCode = response.statusCode();
+      connection = url;
+      connection.setRequestMethod("POST");
+      connection.setRequestProperty("Content-Type", "application/json");
+      connection.setConnectTimeout((int) (requestTimeoutSeconds * 1000));
+      connection.setReadTimeout((int) (requestTimeoutSeconds * 1000));
+      connection.setDoOutput(true);
+      try (OutputStream os = connection.getOutputStream()) {
+        byte[] input = Utils.getObjectMapper().writeValueAsString(ollamaRequestModel).getBytes(StandardCharsets.UTF_8);
+        os.write(input, 0, input.length);
+      }
+      int statusCode = connection.getResponseCode();
       this.httpStatusCode = statusCode;
 
-      InputStream responseBodyStream = response.body();
+      InputStream responseBodyStream = (statusCode == 200) ? connection.getInputStream() : connection.getErrorStream();
       try (BufferedReader reader =
-          new BufferedReader(new InputStreamReader(responseBodyStream, StandardCharsets.UTF_8))) {
+                   new BufferedReader(new InputStreamReader(responseBodyStream, StandardCharsets.UTF_8))) {
         String line;
         StringBuilder responseBuffer = new StringBuilder();
         while ((line = reader.readLine()) != null) {
           if (statusCode == 404) {
             OllamaErrorResponseModel ollamaResponseModel =
-                Utils.getObjectMapper().readValue(line, OllamaErrorResponseModel.class);
+                    Utils.getObjectMapper().readValue(line, OllamaErrorResponseModel.class);
             queue.add(ollamaResponseModel.getError());
             responseBuffer.append(ollamaResponseModel.getError());
           } else {
             OllamaGenerateResponseModel ollamaResponseModel =
-                Utils.getObjectMapper().readValue(line, OllamaGenerateResponseModel.class);
+                    Utils.getObjectMapper().readValue(line, OllamaGenerateResponseModel.class);
             queue.add(ollamaResponseModel.getResponse());
             if (!ollamaResponseModel.isDone()) {
               responseBuffer.append(ollamaResponseModel.getResponse());
@@ -107,10 +107,14 @@ public class OllamaAsyncResultCallback extends Thread {
       if (statusCode != 200) {
         throw new OllamaBaseException(this.result);
       }
-    } catch (IOException | InterruptedException | OllamaBaseException e) {
+    } catch (IOException | OllamaBaseException e) {
       this.isDone = true;
       this.succeeded = false;
       this.result = "[FAILED] " + e.getMessage();
+    } finally {
+      if (connection != null) {
+        connection.disconnect();
+      }
     }
   }
 
@@ -137,7 +141,4 @@ public class OllamaAsyncResultCallback extends Thread {
     return queue;
   }
 
-  public void setRequestTimeoutSeconds(long requestTimeoutSeconds) {
-    this.requestTimeoutSeconds = requestTimeoutSeconds;
-  }
 }

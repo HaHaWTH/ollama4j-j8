@@ -16,12 +16,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
+import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.net.http.HttpClient;
-import java.net.http.HttpConnectTimeoutException;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.Duration;
@@ -89,28 +87,22 @@ public class OllamaAPI {
      */
     public boolean ping() {
         String url = this.host + "/api/tags";
-        HttpClient httpClient = HttpClient.newHttpClient();
-        HttpRequest httpRequest = null;
+        HttpURLConnection connection = null;
         try {
-            httpRequest =
-                    getRequestBuilderDefault(new URI(url))
-                            .header("Accept", "application/json")
-                            .header("Content-type", "application/json")
-                            .GET()
-                            .build();
-        } catch (URISyntaxException e) {
-            throw new RuntimeException(e);
-        }
-        HttpResponse<String> response = null;
-        try {
-            response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
-        } catch (HttpConnectTimeoutException e) {
+            connection = (HttpURLConnection) new URL(url).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setConnectTimeout((int) (requestTimeoutSeconds * 1000));
+            int statusCode = connection.getResponseCode();
+            return statusCode == 200;
+        } catch (IOException e) {
             return false;
-        } catch (IOException | InterruptedException e) {
-            throw new RuntimeException(e);
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
-        int statusCode = response.statusCode();
-        return statusCode == 200;
     }
 
     /**
@@ -121,23 +113,27 @@ public class OllamaAPI {
     public List<Model> listModels()
             throws OllamaBaseException, IOException, InterruptedException, URISyntaxException {
         String url = this.host + "/api/tags";
-        HttpClient httpClient = HttpClient.newHttpClient();
-        HttpRequest httpRequest =
-                getRequestBuilderDefault(new URI(url))
-                        .header("Accept", "application/json")
-                        .header("Content-type", "application/json")
-                        .GET()
-                        .build();
-        HttpResponse<String> response =
-                httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
-        int statusCode = response.statusCode();
-        String responseString = response.body();
-        if (statusCode == 200) {
-            return Utils.getObjectMapper()
-                    .readValue(responseString, ListModelsResponse.class)
-                    .getModels();
-        } else {
-            throw new OllamaBaseException(statusCode + " - " + responseString);
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(url).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setConnectTimeout((int) (requestTimeoutSeconds * 1000));
+            int statusCode = connection.getResponseCode();
+            InputStream responseStream = (statusCode == 200) ? connection.getInputStream() : connection.getErrorStream();
+            String responseString = readStream(responseStream);
+            if (statusCode == 200) {
+                return Utils.getObjectMapper()
+                        .readValue(responseString, ListModelsResponse.class)
+                        .getModels();
+            } else {
+                throw new OllamaBaseException(statusCode + " - " + responseString);
+            }
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
     }
 
@@ -151,31 +147,28 @@ public class OllamaAPI {
             throws OllamaBaseException, IOException, URISyntaxException, InterruptedException {
         String url = this.host + "/api/pull";
         String jsonData = new ModelRequest(modelName).toString();
-        HttpRequest request =
-                getRequestBuilderDefault(new URI(url))
-                        .POST(HttpRequest.BodyPublishers.ofString(jsonData))
-                        .header("Accept", "application/json")
-                        .header("Content-type", "application/json")
-                        .build();
-        HttpClient client = HttpClient.newHttpClient();
-        HttpResponse<InputStream> response =
-                client.send(request, HttpResponse.BodyHandlers.ofInputStream());
-        int statusCode = response.statusCode();
-        InputStream responseBodyStream = response.body();
-        String responseString = "";
-        try (BufferedReader reader =
-                     new BufferedReader(new InputStreamReader(responseBodyStream, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                ModelPullResponse modelPullResponse =
-                        Utils.getObjectMapper().readValue(line, ModelPullResponse.class);
-                if (verbose) {
-                    logger.info(modelPullResponse.getStatus());
-                }
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(url).openConnection();
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setConnectTimeout((int) (requestTimeoutSeconds * 1000));
+            connection.setDoOutput(true);
+            try (OutputStream os = connection.getOutputStream()) {
+                byte[] input = jsonData.getBytes(StandardCharsets.UTF_8);
+                os.write(input, 0, input.length);
             }
-        }
-        if (statusCode != 200) {
-            throw new OllamaBaseException(statusCode + " - " + responseString);
+            int statusCode = connection.getResponseCode();
+            InputStream responseStream = (statusCode == 200) ? connection.getInputStream() : connection.getErrorStream();
+            String responseString = readStream(responseStream);
+            if (statusCode != 200) {
+                throw new OllamaBaseException(statusCode + " - " + responseString);
+            }
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
     }
 
@@ -189,20 +182,30 @@ public class OllamaAPI {
             throws IOException, OllamaBaseException, InterruptedException, URISyntaxException {
         String url = this.host + "/api/show";
         String jsonData = new ModelRequest(modelName).toString();
-        HttpRequest request =
-                getRequestBuilderDefault(new URI(url))
-                        .header("Accept", "application/json")
-                        .header("Content-type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(jsonData))
-                        .build();
-        HttpClient client = HttpClient.newHttpClient();
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        int statusCode = response.statusCode();
-        String responseBody = response.body();
-        if (statusCode == 200) {
-            return Utils.getObjectMapper().readValue(responseBody, ModelDetail.class);
-        } else {
-            throw new OllamaBaseException(statusCode + " - " + responseBody);
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(url).openConnection();
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setConnectTimeout((int) (requestTimeoutSeconds * 1000));
+            connection.setDoOutput(true);
+            try (OutputStream os = connection.getOutputStream()) {
+                byte[] input = jsonData.getBytes(StandardCharsets.UTF_8);
+                os.write(input, 0, input.length);
+            }
+            int statusCode = connection.getResponseCode();
+            InputStream responseStream = (statusCode == 200) ? connection.getInputStream() : connection.getErrorStream();
+            String responseBody = readStream(responseStream);
+            if (statusCode == 200) {
+                return Utils.getObjectMapper().readValue(responseBody, ModelDetail.class);
+            } else {
+                throw new OllamaBaseException(statusCode + " - " + responseBody);
+            }
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
     }
 
@@ -217,26 +220,34 @@ public class OllamaAPI {
             throws IOException, InterruptedException, OllamaBaseException, URISyntaxException {
         String url = this.host + "/api/create";
         String jsonData = new CustomModelFilePathRequest(modelName, modelFilePath).toString();
-        HttpRequest request =
-                getRequestBuilderDefault(new URI(url))
-                        .header("Accept", "application/json")
-                        .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(jsonData, StandardCharsets.UTF_8))
-                        .build();
-        HttpClient client = HttpClient.newHttpClient();
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        int statusCode = response.statusCode();
-        String responseString = response.body();
-        if (statusCode != 200) {
-            throw new OllamaBaseException(statusCode + " - " + responseString);
-        }
-        // FIXME: Ollama API returns HTTP status code 200 for model creation failure cases. Correct this
-        // if the issue is fixed in the Ollama API server.
-        if (responseString.contains("error")) {
-            throw new OllamaBaseException(responseString);
-        }
-        if (verbose) {
-            logger.info(responseString);
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(url).openConnection();
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setConnectTimeout((int) (requestTimeoutSeconds * 1000));
+            connection.setDoOutput(true);
+            try (OutputStream os = connection.getOutputStream()) {
+                byte[] input = jsonData.getBytes(StandardCharsets.UTF_8);
+                os.write(input, 0, input.length);
+            }
+            int statusCode = connection.getResponseCode();
+            InputStream responseStream = (statusCode == 200) ? connection.getInputStream() : connection.getErrorStream();
+            String responseString = readStream(responseStream);
+            if (statusCode != 200) {
+                throw new OllamaBaseException(statusCode + " - " + responseString);
+            }
+            if (responseString.contains("error")) {
+                throw new OllamaBaseException(responseString);
+            }
+            if (verbose) {
+                logger.info(responseString);
+            }
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
     }
 
@@ -251,24 +262,34 @@ public class OllamaAPI {
             throws IOException, InterruptedException, OllamaBaseException, URISyntaxException {
         String url = this.host + "/api/create";
         String jsonData = new CustomModelFileContentsRequest(modelName, modelFileContents).toString();
-        HttpRequest request =
-                getRequestBuilderDefault(new URI(url))
-                        .header("Accept", "application/json")
-                        .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(jsonData, StandardCharsets.UTF_8))
-                        .build();
-        HttpClient client = HttpClient.newHttpClient();
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        int statusCode = response.statusCode();
-        String responseString = response.body();
-        if (statusCode != 200) {
-            throw new OllamaBaseException(statusCode + " - " + responseString);
-        }
-        if (responseString.contains("error")) {
-            throw new OllamaBaseException(responseString);
-        }
-        if (verbose) {
-            logger.info(responseString);
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(url).openConnection();
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setConnectTimeout((int) (requestTimeoutSeconds * 1000));
+            connection.setDoOutput(true);
+            try (OutputStream os = connection.getOutputStream()) {
+                byte[] input = jsonData.getBytes(StandardCharsets.UTF_8);
+                os.write(input, 0, input.length);
+            }
+            int statusCode = connection.getResponseCode();
+            InputStream responseStream = (statusCode == 200) ? connection.getInputStream() : connection.getErrorStream();
+            String responseString = readStream(responseStream);
+            if (statusCode != 200) {
+                throw new OllamaBaseException(statusCode + " - " + responseString);
+            }
+            if (responseString.contains("error")) {
+                throw new OllamaBaseException(responseString);
+            }
+            if (verbose) {
+                logger.info(responseString);
+            }
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
     }
 
@@ -282,21 +303,31 @@ public class OllamaAPI {
             throws IOException, InterruptedException, OllamaBaseException, URISyntaxException {
         String url = this.host + "/api/delete";
         String jsonData = new ModelRequest(modelName).toString();
-        HttpRequest request =
-                getRequestBuilderDefault(new URI(url))
-                        .method("DELETE", HttpRequest.BodyPublishers.ofString(jsonData, StandardCharsets.UTF_8))
-                        .header("Accept", "application/json")
-                        .header("Content-type", "application/json")
-                        .build();
-        HttpClient client = HttpClient.newHttpClient();
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        int statusCode = response.statusCode();
-        String responseBody = response.body();
-        if (statusCode == 404 && responseBody.contains("model") && responseBody.contains("not found")) {
-            return;
-        }
-        if (statusCode != 200) {
-            throw new OllamaBaseException(statusCode + " - " + responseBody);
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(url).openConnection();
+            connection.setRequestMethod("DELETE");
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setConnectTimeout((int) (requestTimeoutSeconds * 1000));
+            connection.setDoOutput(true);
+            try (OutputStream os = connection.getOutputStream()) {
+                byte[] input = jsonData.getBytes(StandardCharsets.UTF_8);
+                os.write(input, 0, input.length);
+            }
+            int statusCode = connection.getResponseCode();
+            InputStream responseStream = (statusCode == 200) ? connection.getInputStream() : connection.getErrorStream();
+            String responseBody = readStream(responseStream);
+            if (statusCode == 404 && responseBody.contains("model") && responseBody.contains("not found")) {
+                return;
+            }
+            if (statusCode != 200) {
+                throw new OllamaBaseException(statusCode + " - " + responseBody);
+            }
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
     }
 
@@ -321,33 +352,41 @@ public class OllamaAPI {
     public List<Double> generateEmbeddings(OllamaEmbeddingsRequestModel modelRequest) throws IOException, InterruptedException, OllamaBaseException {
         URI uri = URI.create(this.host + "/api/embeddings");
         String jsonData = modelRequest.toString();
-        HttpClient httpClient = HttpClient.newHttpClient();
-        HttpRequest.Builder requestBuilder =
-                getRequestBuilderDefault(uri)
-                        .header("Accept", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(jsonData));
-        HttpRequest request = requestBuilder.build();
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        int statusCode = response.statusCode();
-        String responseBody = response.body();
-        if (statusCode == 200) {
-            OllamaEmbeddingResponseModel embeddingResponse =
-                    Utils.getObjectMapper().readValue(responseBody, OllamaEmbeddingResponseModel.class);
-            return embeddingResponse.getEmbedding();
-        } else {
-            throw new OllamaBaseException(statusCode + " - " + responseBody);
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(uri.toString()).openConnection();
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setConnectTimeout((int) (requestTimeoutSeconds * 1000));
+            connection.setDoOutput(true);
+            try (OutputStream os = connection.getOutputStream()) {
+                byte[] input = jsonData.getBytes(StandardCharsets.UTF_8);
+                os.write(input, 0, input.length);
+            }
+            int statusCode = connection.getResponseCode();
+            InputStream responseStream = (statusCode == 200 ? connection.getInputStream() : connection.getErrorStream());
+            String responseBody = readStream(responseStream);
+            if (statusCode == 200) {
+                OllamaEmbeddingResponseModel embeddingResponse =
+                        Utils.getObjectMapper().readValue(responseBody, OllamaEmbeddingResponseModel.class);
+                return embeddingResponse.getEmbedding();
+            } else {
+                throw new OllamaBaseException(statusCode + " - " + responseBody);
+            }
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
     }
 
     /**
-     * Generate response for a question to a model running on Ollama server. This is a sync/blocking
-     * call.
+     * Generate response for a question to a model running on Ollama server. This is a sync/blocking call.
      *
      * @param model         the ollama model to ask the question to
      * @param prompt        the prompt/question text
-     * @param options       the Options object - <a
-     *                      href="https://github.com/jmorganca/ollama/blob/main/docs/modelfile.md#valid-parameters-and-values">More
-     *                      details on the options</a>
+     * @param options       the Options object - <a href="https://github.com/jmorganca/ollama/blob/main/docs/modelfile.md#valid-parameters-and-values">More details on the options</a>
      * @param streamHandler optional callback consumer that will be applied every time a streamed response is received. If not set, the stream parameter of the request is set to false.
      * @return OllamaResult that includes response text and time taken for response
      */
@@ -377,7 +416,7 @@ public class OllamaAPI {
      * @param prompt the prompt/question text
      * @return the ollama async result callback handle
      */
-    public OllamaAsyncResultCallback generateAsync(String model, String prompt) {
+    public OllamaAsyncResultCallback generateAsync(String model, String prompt) throws IOException {
         OllamaGenerateRequestModel ollamaRequestModel = new OllamaGenerateRequestModel(model, prompt);
 
         URI uri = URI.create(this.host + "/api/generate");
@@ -389,15 +428,12 @@ public class OllamaAPI {
     }
 
     /**
-     * With one or more image files, ask a question to a model running on Ollama server. This is a
-     * sync/blocking call.
+     * With one or more image files, ask a question to a model running on Ollama server. This is a sync/blocking call.
      *
      * @param model         the ollama model to ask the question to
      * @param prompt        the prompt/question text
      * @param imageFiles    the list of image files to use for the question
-     * @param options       the Options object - <a
-     *                      href="https://github.com/jmorganca/ollama/blob/main/docs/modelfile.md#valid-parameters-and-values">More
-     *                      details on the options</a>
+     * @param options       the Options object - <a href="https://github.com/jmorganca/ollama/blob/main/docs/modelfile.md#valid-parameters-and-values">More details on the options</a>
      * @param streamHandler optional callback consumer that will be applied every time a streamed response is received. If not set, the stream parameter of the request is set to false.
      * @return OllamaResult that includes response text and time taken for response
      */
@@ -425,15 +461,12 @@ public class OllamaAPI {
     }
 
     /**
-     * With one or more image URLs, ask a question to a model running on Ollama server. This is a
-     * sync/blocking call.
+     * With one or more image URLs, ask a question to a model running on Ollama server. This is a sync/blocking call.
      *
      * @param model         the ollama model to ask the question to
      * @param prompt        the prompt/question text
      * @param imageURLs     the list of image URLs to use for the question
-     * @param options       the Options object - <a
-     *                      href="https://github.com/jmorganca/ollama/blob/main/docs/modelfile.md#valid-parameters-and-values">More
-     *                      details on the options</a>
+     * @param options       the Options object - <a href="https://github.com/jmorganca/ollama/blob/main/docs/modelfile.md#valid-parameters-and-values">More details on the options</a>
      * @param streamHandler optional callback consumer that will be applied every time a streamed response is received. If not set, the stream parameter of the request is set to false.
      * @return OllamaResult that includes response text and time taken for response
      */
@@ -460,14 +493,12 @@ public class OllamaAPI {
         return generateWithImageURLs(model, prompt, imageURLs, options, null);
     }
 
-
     /**
-     * Ask a question to a model based on a given message stack (i.e. a chat history). Creates a synchronous call to the api
-     * 'api/chat'.
+     * Ask a question to a model based on a given message stack (i.e. a chat history). Creates a synchronous call to the api 'api/chat'.
      *
      * @param model    the ollama model to ask the question to
      * @param messages chat history / message stack to send to the model
-     * @return {@link OllamaChatResult} containing the api response and the message history including the newly aqcuired assistant response.
+     * @return {@link OllamaChatResult} containing the api response and the message history including the newly acquired assistant response.
      * @throws OllamaBaseException  any response code than 200 has been returned
      * @throws IOException          in case the responseStream can not be read
      * @throws InterruptedException in case the server is not reachable or network issues happen
@@ -483,7 +514,7 @@ public class OllamaAPI {
      * Hint: the OllamaChatRequestModel#getStream() property is not implemented.
      *
      * @param request request object to be sent to the server
-     * @return
+     * @return {@link OllamaChatResult}
      * @throws OllamaBaseException  any response code than 200 has been returned
      * @throws IOException          in case the responseStream can not be read
      * @throws InterruptedException in case the server is not reachable or network issues happen
@@ -499,7 +530,7 @@ public class OllamaAPI {
      *
      * @param request       request object to be sent to the server
      * @param streamHandler callback handler to handle the last message from stream (caution: all previous messages from stream will be concatenated)
-     * @return
+     * @return {@link OllamaChatResult}
      * @throws OllamaBaseException  any response code than 200 has been returned
      * @throws IOException          in case the responseStream can not be read
      * @throws InterruptedException in case the server is not reachable or network issues happen
@@ -516,7 +547,7 @@ public class OllamaAPI {
         return new OllamaChatResult(result.getResponse(), result.getResponseTime(), result.getHttpStatusCode(), request.getMessages());
     }
 
-    // technical private methods //
+// technical private methods //
 
     private static String encodeFileToBase64(File file) throws IOException {
         return Base64.getEncoder().encodeToString(Files.readAllBytes(file.toPath()));
@@ -545,17 +576,16 @@ public class OllamaAPI {
      * Get default request builder.
      *
      * @param uri URI to get a HttpRequest.Builder
-     * @return HttpRequest.Builder
+     * @return HttpURLConnection
      */
-    private HttpRequest.Builder getRequestBuilderDefault(URI uri) {
-        HttpRequest.Builder requestBuilder =
-                HttpRequest.newBuilder(uri)
-                        .header("Content-Type", "application/json")
-                        .timeout(Duration.ofSeconds(requestTimeoutSeconds));
+    private HttpURLConnection getRequestBuilderDefault(URI uri) throws IOException {
+        HttpURLConnection connection = (HttpURLConnection) new URL(uri.toString()).openConnection();
+        connection.setRequestProperty("Content-Type", "application/json");
+        connection.setConnectTimeout((int) (requestTimeoutSeconds * 1000));
         if (isBasicAuthCredentialsSet()) {
-            requestBuilder.header("Authorization", getBasicAuthHeaderValue());
+            connection.setRequestProperty("Authorization", getBasicAuthHeaderValue());
         }
-        return requestBuilder;
+        return connection;
     }
 
     /**
@@ -575,5 +605,22 @@ public class OllamaAPI {
      */
     private boolean isBasicAuthCredentialsSet() {
         return basicAuth != null;
+    }
+
+    /**
+     * Read InputStream as String.
+     *
+     * @param stream InputStream to be read
+     * @return String
+     * @throws IOException in case the stream cannot be read
+     */
+    private static String readStream(InputStream stream) throws IOException {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
+        StringBuilder result = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            result.append(line);
+        }
+        return result.toString();
     }
 }
